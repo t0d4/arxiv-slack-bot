@@ -1,0 +1,12 @@
+# credentials
+.env
+
+# notebooks for experiment
+.ipynb
+
+# venv
+venv/
+
+# python cache
+*.pyc
+__pycache__/
