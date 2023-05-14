@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "arxiv-slack-bot"
+version = "0.1.0"
+description = "Retrieves information of theses posted on arxiv.org and send its summary to Slack."
+authors = ["t0d4 <todatakaaki@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+arxiv = "^1.4.7"
+transformers = "^4.29.1"
+torch = "^2.0.1"
+slack-bolt = "^1.18.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.3.0"
+ruff = "^0.0.267"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
