@@ -11,10 +11,13 @@ arxiv = "^1.4.7"
 transformers = "^4.29.1"
 torch = "^2.0.1"
 slack-bolt = "^1.18.0"
+deepl = "^1.14.0"
+python-dotenv = "^1.0.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.3.0"
 ruff = "^0.0.267"
+isort = "^5.12.0"
 
 [build-system]
 requires = ["poetry-core"]

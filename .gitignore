@@ -2,7 +2,7 @@
 .env
 
 # notebooks for experiment
-.ipynb
+*.ipynb
 
 # venv
 venv/
