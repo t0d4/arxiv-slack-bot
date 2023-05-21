@@ -1,3 +1,4 @@
+import gc
 import os
 import re
 import string
@@ -6,8 +7,9 @@ from typing import Optional
 
 import config
 import deepl
-import torch  # arxiv.Result represents each thesis
-from arxiv import Result, Search
+import torch
+from arxiv import Result, Search  # arxiv.Result represents each thesis
+from slack_sdk.models.blocks import MarkdownTextObject, SectionBlock
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -17,11 +19,11 @@ class Document:
         self.key_points: Optional[list[str]] = None
 
     def __str__(self) -> str:
-        return self.get_formatted_string()
+        return str(self.arxiv_doc)
 
-    def get_formatted_string(self) -> str:
+    def get_formatted_message(self) -> list[SectionBlock]:
         """
-        create string that contains information of this document.
+        create slack message that contains information of this document.
 
         Note: Document must be summarized using `DocumentHandler.summarize_documents` before executing this method.
 
@@ -29,22 +31,26 @@ class Document:
             None
 
         Returns:
-            str: formatted string that contains information of this document.
+            list[Block]: slack message (consists of blocks) that contains information of this document.
         """
         if not self.key_points:
             raise Exception("This document is not summarized yet.")
 
-        formatted = textwrap.dedent(
-            f"""
-        [{self.arxiv_doc.entry_id.split("/")[-1]}]
-        title: **{self.arxiv_doc.title}**
-        link: {self.arxiv_doc.entry_id}
-        summary:\
-        """
-        )
+        key_points_formatted = ""
         for key_point in self.key_points:
-            formatted += f"\n- {key_point}"
-        return formatted
+            key_points_formatted += f"• {key_point}\n"
+
+        blocks = [
+            SectionBlock(text=MarkdownTextObject(text=f"*[{self.arxiv_doc.title}]*")),
+            SectionBlock(
+                text=MarkdownTextObject(
+                    text=f"<{self.arxiv_doc.entry_id}|view on arxiv.org>"
+                )
+            ),
+            SectionBlock(text=MarkdownTextObject(text=key_points_formatted)),
+        ]
+
+        return blocks
 
 
 class Searcher:
@@ -82,36 +88,50 @@ class Searcher:
 
 
 class DocumentHandler:
-    def __init__(self) -> None:
+    def __init__(self, llm_model_name_or_path: str) -> None:
+        """
+        initialize `DocumentHandler` instance.
+
+        Parameters:
+            model_name_or_path: str - model name or path to the LLM, which will be passed to `from_pretrained` method in `AutoClass` by hugging face transformers.
+
+        Returns:
+            None
+        """
+        self._tokenizer = None
+        self._model = None
+        self.model_name_or_path = llm_model_name_or_path
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
 
     # load "path/to/stable-vicuna-13b-applied"
-    def load_model(self, model_name_or_path) -> None:
+    def load_model(self) -> None:
+        # TODO: add procedure to handle in case available VRAM is too small.
+
         """
         load LLM to RAM or VRAM.
 
         Parameters:
-            model_name_or_path: str - model name or path to the model, which is passed to `from_pretrained` method in `AutoClass` by hugging face transformers.
+            None
 
         Returns:
             None
         """
         if self._tokenizer and self._model:
-            print(f"Model {self._model.config.model_name} is already loaded.")
+            print("Model is already loaded.")
             return
 
+        print(f"Loading model: {self.model_name_or_path}")
         self._tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path=model_name_or_path,
+            pretrained_model_name_or_path=self.model_name_or_path,
             device_map=config.HUGGING_FACE_DEVICE_MAP,
         )
         self._model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path=model_name_or_path,
+            pretrained_model_name_or_path=self.model_name_or_path,
             device_map=config.HUGGING_FACE_DEVICE_MAP,
         )
-        self._model.half().cuda()  # load model in half-precision
-        print(f"Successfully loaded model: {self._model.config.model_name}")
+        print("Successfully loaded the model")
 
     def unload_model(self) -> None:
         """
@@ -129,6 +149,7 @@ class DocumentHandler:
         # TODO: investigate if this works as expected
         self._tokenizer = None
         self._model = None
+        gc.collect()
         print("Successfully unloaded the model")
 
     def _get_response_from_llm(self, prompt: str) -> str:
@@ -141,11 +162,14 @@ class DocumentHandler:
                 "Model is not loaded yet. Call `load_model` to load it in advance."
             )
         inputs = self._tokenizer(prompt, return_tensors="pt").to(device=self.device)
+        del inputs[
+            "token_type_ids"
+        ]  # this is currently necessary in order to avoid this error: ValueError: The following `model_kwargs` are not used by the model: ['token_type_ids'] (note: typos in the generate arguments will also show up in this list)
         tokens = self._model.generate(
             **inputs,
             max_new_tokens=512,
             do_sample=True,
-            temperature=0.7,
+            temperature=0.1,
             top_k=50,  # TODO: there's room for optimization
             top_p=0.95,
         )
@@ -188,21 +212,27 @@ class DocumentHandler:
         """
         # TODO: consider better prompt
         prompt_base = string.Template(
-            """\
-        Read the abstract of delimited by triple backquotes and summarize it, \
-        then write exactly 3 key points in the following output format:
-        -- key point 1
-        -- key point 2
-        -- key point 3
+            textwrap.dedent(
+                """\
+            You're a professional summary writer. Read the abstract of delimited by triple backquotes and summarize it, \
+            then write exactly 3 key points in the output section indicated with [OUTPUT]
 
-        ```${abstract}```\
-        """
+            ```${abstract}```
+
+            [OUTPUT]
+            -- key point 1:
+            """
+            )
         )
 
         for doc in docs:
             prompt = prompt_base.safe_substitute({"abstract": doc.arxiv_doc.summary})
             output = self._get_response_from_llm(prompt=prompt)
-            key_points = re.findall(pattern="-- (.+)", string=output)
+            key_points = re.findall(
+                pattern=r"(?<=-- key point \d:)[\s\S]+?(?=--|$)", string=output
+            )
+            for idx, key_point in enumerate(key_points):
+                key_points[idx] = key_point.strip()
             doc.key_points = key_points
 
         if translate:
