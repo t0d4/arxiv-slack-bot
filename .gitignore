@@ -11,3 +11,6 @@ venv/
 # python cache
 *.pyc
 __pycache__/
+
+# various tests
+test/
