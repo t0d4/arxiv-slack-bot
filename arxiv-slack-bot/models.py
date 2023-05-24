@@ -1,27 +1,41 @@
-import gc
+import glob
 import os
+import pickle
 import re
 import string
 import textwrap
-from typing import Optional
+from typing import List, Optional
 
 import config
 import deepl
 import torch
 from arxiv import Result, Search  # arxiv.Result represents each thesis
-from slack_sdk.models.blocks import MarkdownTextObject, SectionBlock
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from exceptions import DocumentAlreadyVectorizedException
+from langchain.chains import ConversationalRetrievalChain
+from langchain.document_loaders import PyPDFLoader
+from langchain.embeddings.sentence_transformer import SentenceTransformerEmbeddings
+from langchain.llms import HuggingFacePipeline
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from slack_sdk.models.blocks import (
+    ActionsBlock,
+    ButtonElement,
+    MarkdownTextObject,
+    PlainTextObject,
+    SectionBlock,
+)
+from transformers import AutoModelForCausalLM, AutoTokenizer, Pipeline, pipeline
 
 
 class Document:
     def __init__(self, arxiv_doc: Result) -> None:
         self.arxiv_doc: Result = arxiv_doc
-        self.key_points: Optional[list[str]] = None
+        self.key_points: Optional[List[str]] = None
 
     def __str__(self) -> str:
         return str(self.arxiv_doc)
 
-    def get_formatted_message(self) -> list[SectionBlock]:
+    def get_formatted_message(self) -> List[SectionBlock]:
         """
         create slack message that contains information of this document.
 
@@ -31,7 +45,7 @@ class Document:
             None
 
         Returns:
-            list[Block]: slack message (consists of blocks) that contains information of this document.
+            List[Block]: slack message (consists of blocks) that contains information of this document.
         """
         if not self.key_points:
             raise Exception("This document is not summarized yet.")
@@ -41,13 +55,23 @@ class Document:
             key_points_formatted += f"• {key_point}\n"
 
         blocks = [
-            SectionBlock(text=MarkdownTextObject(text=f"*[{self.arxiv_doc.title}]*")),
+            SectionBlock(text=MarkdownTextObject(text=f"*[ {self.arxiv_doc.title} ]*")),
             SectionBlock(
                 text=MarkdownTextObject(
                     text=f"<{self.arxiv_doc.entry_id}|view on arxiv.org>"
                 )
             ),
             SectionBlock(text=MarkdownTextObject(text=key_points_formatted)),
+            ActionsBlock(
+                block_id="talk_about_thesis-button-block",
+                elements=[
+                    ButtonElement(
+                        text=PlainTextObject(text="Discuss it!"),
+                        value=self.arxiv_doc.get_short_id(),
+                        action_id="discuss-button-action",
+                    )
+                ],
+            ),
         ]
 
         return blocks
@@ -57,7 +81,7 @@ class Searcher:
     def __init__(self, initial_query) -> None:
         self._query: str = initial_query
 
-    def search(self, **kwargs) -> list[Document]:
+    def search(self, **kwargs) -> List[Document]:
         """
         search for theses on arXiv.
 
@@ -66,7 +90,7 @@ class Searcher:
         Parameters:
             kwargs: keyword arguments passed to `arxiv.Seach.__init__()`.
         Returns:
-            list[Documents]: list of `Document` instances which contains the search result
+            List[Documents]: list of `Document` instances which contains the search result
         """
         if "query" in kwargs or "id_list" in kwargs:
             search = Search(**kwargs)
@@ -88,7 +112,7 @@ class Searcher:
 
 
 class DocumentHandler:
-    def __init__(self, llm_model_name_or_path: str) -> None:
+    def __init__(self, llm_model_name_or_path: str, deepl_token: str) -> None:
         """
         initialize `DocumentHandler` instance.
 
@@ -98,15 +122,16 @@ class DocumentHandler:
         Returns:
             None
         """
-        self._tokenizer = None
-        self._model = None
-        self.model_name_or_path = llm_model_name_or_path
+        self._pipe = self._load_model(llm_model_name_or_path=llm_model_name_or_path)
+        # self.hf_pipeline will store LangChain's wrapper around Hugging Face pipeline.
+        self.hf_pipeline = HuggingFacePipeline(pipeline=self._pipe)
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
+        self.translator = deepl.Translator(auth_key=deepl_token)
+        self.embedding = SentenceTransformerEmbeddings()
 
-    # load "path/to/stable-vicuna-13b-applied"
-    def load_model(self) -> None:
+    def _load_model(self, llm_model_name_or_path) -> Pipeline:
         # TODO: add procedure to handle in case available VRAM is too small.
 
         """
@@ -118,68 +143,43 @@ class DocumentHandler:
         Returns:
             None
         """
-        if self._tokenizer and self._model:
-            print("Model is already loaded.")
-            return
 
-        print(f"Loading model: {self.model_name_or_path}")
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path=self.model_name_or_path,
+        print(f"Loading model: {llm_model_name_or_path}")
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=llm_model_name_or_path,
             device_map=config.HUGGING_FACE_DEVICE_MAP,
         )
-        self._model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path=self.model_name_or_path,
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=llm_model_name_or_path,
             device_map=config.HUGGING_FACE_DEVICE_MAP,
         )
-        print("Successfully loaded the model")
 
-    def unload_model(self) -> None:
-        """
-        unload LLM from RAM or VRAM.
-        this method is designed to prevent `DocumentHandler` from occupying
-        large amount of RAM or VRAM forever.
-
-        Parameters:
-            None
-
-        Returns:
-            None
-        """
-        # free the VRAM allocated for tokenizer and model
-        # TODO: investigate if this works as expected
-        self._tokenizer = None
-        self._model = None
-        gc.collect()
-        print("Successfully unloaded the model")
-
-    def _get_response_from_llm(self, prompt: str) -> str:
-        if not self._tokenizer:
-            raise Exception(
-                "Tokenizer is not loaded yet. Call `load_model` to load it in advance."
-            )
-        if not self._model:
-            raise Exception(
-                "Model is not loaded yet. Call `load_model` to load it in advance."
-            )
-        inputs = self._tokenizer(prompt, return_tensors="pt").to(device=self.device)
-        del inputs[
-            "token_type_ids"
-        ]  # this is currently necessary in order to avoid this error: ValueError: The following `model_kwargs` are not used by the model: ['token_type_ids'] (note: typos in the generate arguments will also show up in this list)
-        tokens = self._model.generate(
-            **inputs,
+        self._pipe = pipeline(
+            task="text-generation",
+            model=model,
+            tokenizer=tokenizer,
             max_new_tokens=512,
             do_sample=True,
             temperature=0.1,
             top_k=50,  # TODO: there's room for optimization
             top_p=0.95,
         )
-        decoded_output = self._tokenizer.decode(tokens[0], skip_special_tokens=True)
-        return decoded_output
+        print("Successfully loaded the model")
+        return self._pipe
+
+    def _get_response_from_llm(self, prompt: str) -> str:
+        if not self._pipe:
+            raise Exception(
+                "Model is not loaded yet. Call `load_model` to load it in advance."
+            )
+
+        # TODO: make this more efficient by processing documents as a batch
+        model_output = self._pipe(prompt)[0]["generated_text"]  # type:ignore
+        return model_output  # type:ignore
 
     def _translate_key_points_of_documents(
-        self, docs: list[Document], api_token: str
-    ) -> list[Document]:
-        translator = deepl.Translator(auth_key=api_token)
+        self, docs: List[Document]
+    ) -> List[Document]:
         for doc in docs:
             if not doc.key_points:
                 raise Exception(
@@ -187,16 +187,16 @@ class DocumentHandler:
                 )
             doc.key_points = [
                 translation_result.text
-                for translation_result in translator.translate_text(
+                for translation_result in self.translator.translate_text(
                     text=doc.key_points, target_lang="ja"
                 )  # type:ignore because translate_text MUST return List[TextResult]
-                # when list[str] is passed to the argument "text"
+                # when List[str] is passed to the argument "text"
             ]
         return docs
 
     def summarize_documents(
-        self, docs: list[Document], translate=True
-    ) -> list[Document]:
+        self, docs: List[Document], translate=True
+    ) -> List[Document]:
         """
         summarize documents by extracting their key points, and then
         write them to `Document.key_points`.
@@ -204,11 +204,11 @@ class DocumentHandler:
         Note: this method DESTRUCTIVELY changes the docs passed as argument.
 
         Parameter:
-            docs: list[Document] - list of documents to process.
+            docs: List[Document] - list of documents to process.
             translate: bool (default: True) - whether to translate key points into Japanese.
 
         Returns:
-            docs: list[Document] - list of documents written their key points in `Document.key_points`
+            docs: List[Document] - list of documents written their key points in `Document.key_points`
         """
         # TODO: consider better prompt
         prompt_base = string.Template(
@@ -236,8 +236,85 @@ class DocumentHandler:
             doc.key_points = key_points
 
         if translate:
-            docs = self._translate_key_points_of_documents(
-                docs=docs, api_token=os.environ["DEEPL_AUTH_TOKEN"]
-            )
+            docs = self._translate_key_points_of_documents(docs=docs)
 
         return docs
+
+    def convert_pdf_into_vector_db(self, thread_id: str, thesis_id: str) -> None:
+        vector_db_save_path = os.path.join(
+            config.VECTOR_DB_SAVE_DIR, f"{thesis_id}-{thread_id}"
+        )
+
+        if os.path.exists(vector_db_save_path):
+            raise DocumentAlreadyVectorizedException(
+                "this document is already converted into vector db."
+            )
+
+        # create document loader to load pdf
+        loader = PyPDFLoader(file_path=f"https://arxiv.org/pdf/{thesis_id}.pdf")
+        # split it into chunks
+        pdf_pages = loader.load()
+        # prepare text splitter TODO: optimize the parameters
+        splitter = RecursiveCharacterTextSplitter(chunk_size=256, chunk_overlap=16)
+        # split pdf pages into smaller chunks
+        docs = splitter.split_documents(documents=pdf_pages)
+        # vectorize the document using FAISS
+        db = FAISS.from_documents(documents=docs, embedding=self.embedding)
+        # save the embedding as a local folder ( folder name will be f"{thesis_id}-{thread_id}" )
+        db.save_local(folder_path=vector_db_save_path)
+
+    def _search_vector_db_by_thread_id(self, thread_id: str) -> FAISS:
+        db_paths = glob.glob(
+            pathname=os.path.join(config.VECTOR_DB_SAVE_DIR, f"*-{thread_id}")
+        )
+        if not db_paths:
+            raise FileNotFoundError(
+                f"db file related to thread_id: {thread_id} was not found."
+            )
+
+        db_path = db_paths[0]
+        return FAISS.load_local(folder_path=db_path, embeddings=self.embedding)
+
+    def answer_question_with_source_documents(
+        self, thread_id: str, question: str, translate=True
+    ):
+        db = self._search_vector_db_by_thread_id(thread_id=thread_id)
+
+        chat_history_filepath = os.path.join(
+            config.CHAT_HISTORY_SAVE_DIR, f"{thread_id}.pkl"
+        )
+        if os.path.exists(path=chat_history_filepath):
+            with open(chat_history_filepath, "rb") as file:
+                chat_history = pickle.load(file)
+        else:
+            chat_history = []
+
+        qa = ConversationalRetrievalChain.from_llm(
+            llm=self.hf_pipeline,
+            retriever=db.as_retriever(),
+            chain_type="map_reduce",
+            return_source_documents=True,
+        )
+
+        # translate question into English before passing it to LLM
+        if translate:
+            question = self.translator.translate_text(
+                text=question, target_lang="en-US"
+            ).text  # type:ignore
+
+        result = qa({"question": question, "chat_history": chat_history})
+        answer = result["answer"]
+
+        chat_history.append((question, answer))
+        with open(chat_history_filepath, "wb") as file:
+            pickle.dump(obj=chat_history, file=file)
+
+        # translate answer into Japanese before sending it to the user
+        if translate:
+            answer = self.translator.translate_text(
+                text=answer, target_lang="ja"
+            ).text  # type:ignore
+
+        source_documents = result["source_documents"]
+
+        return answer, source_documents
