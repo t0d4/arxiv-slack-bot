@@ -78,7 +78,7 @@ def update_search_modal(
 def handle_search_modal(ack: Ack, view: dict, body: dict, client: WebClient, say: Say):
     ack()
 
-    user_id: str = body[""]
+    user_id: str = body["user"]["id"]
     channel_id: str = view["private_metadata"]
     search_type: str = view["callback_id"]
     if search_type == "modal_search_thesis_with_url":
