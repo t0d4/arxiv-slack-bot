@@ -1,6 +1,9 @@
+from typing import Tuple
+
+
 def get_query_and_max_desired_results_from_modal_submission(
     response_view: dict,
-) -> tuple[str, int]:
+) -> Tuple[str, int]:
     query_string = ""
     state_values = response_view["state"]["values"]
     if title := state_values["title-input-block"]["title-input-action"]["value"]:
