@@ -13,19 +13,16 @@ slack-bolt = "^1.18.0"
 deepl = "^1.14.0"
 python-dotenv = "^1.0.0"
 aiohttp = "^3.8.4"
-torch = {version = "^2.0.1+cu118", source = "torch"}
 sympy = "^1.12"
+torch = "^2.0.1"
+langchain = "^0.0.176"
+pypdf = "^3.9.0"
+sentence-transformers = "^2.2.2"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.3.0"
 ruff = "^0.0.267"
 isort = "^5.12.0"
-
-
-[[tool.poetry.source]]
-name = "torch"
-url = "https://download.pytorch.org/whl/cu118"
-priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]
