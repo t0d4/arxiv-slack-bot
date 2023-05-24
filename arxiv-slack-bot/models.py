@@ -291,7 +291,9 @@ class DocumentHandler:
 
         qa = ConversationalRetrievalChain.from_llm(
             llm=self.hf_pipeline,
-            retriever=db.as_retriever(),
+            retriever=db.as_retriever(
+                k=2
+            ),  # retrieve 2 most related parts from the document
             chain_type="map_reduce",
             return_source_documents=True,
         )
