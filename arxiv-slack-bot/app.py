@@ -204,8 +204,12 @@ def talk_about_document(event: dict, context: BoltContext, say: Say):
     except FileNotFoundError:  # when vector db was not found for this thesis
         say(text="まだこの論文はちゃんと読んでいないようです。先にDiscuss it!ボタンを押してください。", thread_ts=thread_id)
     else:
-        pass
-        # TODO: check LLM's output and return it to the user
+        source_pages = [doc.metadata["page"] + 1 for doc in source_docs]
+        source_pages = map(str, sorted(list(set(source_pages))))
+        say(
+            text=f"[ 回答の参考にしたページ: {','.join(source_pages)} ]\n" + answer,
+            thread_ts=thread_id,
+        )
 
 
 if __name__ == "__main__":
