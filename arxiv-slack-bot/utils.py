@@ -4,6 +4,17 @@ from typing import Tuple
 def get_query_and_max_desired_results_from_modal_submission(
     response_view: dict,
 ) -> Tuple[str, int]:
+    """
+    build search query from modal response, which conforms to
+    arXiv query format. (https://info.arxiv.org/help/api/user-manual.html#query_details)
+    max desired number of results is also returned.
+
+    Parameters:
+        response_view: dict - response object from Slack API
+
+    Returns
+        (query_string, max_results): Tuple[str, int] - built query string and max desired number of results
+    """
     query_string = ""
     state_values = response_view["state"]["values"]
     if title := state_values["title-input-block"]["title-input-action"]["value"]:
