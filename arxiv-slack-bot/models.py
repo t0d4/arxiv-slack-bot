@@ -129,7 +129,9 @@ class DocumentHandler:
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
         self.translator = deepl.Translator(auth_key=deepl_token)
-        self.embedding = SentenceTransformerEmbeddings()
+        self.embedding = SentenceTransformerEmbeddings(
+            model_kwargs={"device": config.SENTENCE_TRANSFORMER_DEVICE}
+        )
 
     def _load_model(self, llm_model_name_or_path) -> Pipeline:
         # TODO: add procedure to handle in case available VRAM is too small.
@@ -149,9 +151,14 @@ class DocumentHandler:
             pretrained_model_name_or_path=llm_model_name_or_path,
             device_map=config.HUGGING_FACE_DEVICE_MAP,
         )
+        if config.LOAD_IN_16BIT:
+            torch_dtype = torch.float16
+        else:
+            torch_dtype = torch.float32
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=llm_model_name_or_path,
             device_map=config.HUGGING_FACE_DEVICE_MAP,
+            torch_dtype=torch_dtype,
         )
 
         self._pipe = pipeline(
@@ -203,7 +210,7 @@ class DocumentHandler:
 
         Note: this method DESTRUCTIVELY changes the docs passed as argument.
 
-        Parameter:
+        Parameters:
             docs: List[Document] - list of documents to process.
             translate: bool (default: True) - whether to translate key points into Japanese.
 
@@ -241,6 +248,20 @@ class DocumentHandler:
         return docs
 
     def convert_pdf_into_vector_db(self, thread_id: str, thesis_id: str) -> None:
+        """
+        retrieve PDF from arxiv.org and split it into smaller parts, then vectorize them,
+        finally store the generated vector store on disk.
+
+        Parameters:
+            thread_id: str - ID of the thread that the message with the button is a parent of.
+            thesis_id: str - ID of the thesis described in the message with the button.
+
+        Returns:
+            None
+
+        Raises:
+            DocumentAlreadyVectorizedException - raised when the specified thesis has already been vectorized.
+        """
         vector_db_save_path = os.path.join(
             config.VECTOR_DB_SAVE_DIR, f"{thesis_id}-{thread_id}"
         )
@@ -264,12 +285,26 @@ class DocumentHandler:
         db.save_local(folder_path=vector_db_save_path)
 
     def _search_vector_db_by_thread_id(self, thread_id: str) -> FAISS:
+        """
+        search for existing vector store that stores information about the thesis
+        described in the parent message of the thread `thread_id`, then returns
+        the instance of the vector store.
+
+        Parameters:
+            thread_id: str - ID of the thread whose parent message describes the thesis you want to discuss.
+
+        Returns:
+            FAISS - instance of the found vector store
+
+        Raises:
+            FileNotFoundError - raised when vector store related to `thread_id` was not found.
+        """
         db_paths = glob.glob(
             pathname=os.path.join(config.VECTOR_DB_SAVE_DIR, f"*-{thread_id}")
         )
         if not db_paths:
             raise FileNotFoundError(
-                f"db file related to thread_id: {thread_id} was not found."
+                f"db related to thread_id: {thread_id} was not found."
             )
 
         db_path = db_paths[0]
@@ -278,6 +313,17 @@ class DocumentHandler:
     def answer_question_with_source_documents(
         self, thread_id: str, question: str, translate=True
     ):
+        """
+        load vector store and chat history from disk and generate answer to `question`.
+
+        Parameters:
+            thread_id: str - ID of the thread where the question message by the user is sent.
+            question: str - question by the user, written in arbitrary language.
+            translate: bool (default: True) - whether to translate the text when inputting question to LLM and outputting answer from LLM.
+
+        Returns:
+            (answer, source_documents): Tuple[str, List[Document]] - the answer from LLM and the source documents LLM referred to.
+        """
         db = self._search_vector_db_by_thread_id(thread_id=thread_id)
 
         chat_history_filepath = os.path.join(
