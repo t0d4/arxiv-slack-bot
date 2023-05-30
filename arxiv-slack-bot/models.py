@@ -221,7 +221,7 @@ class DocumentHandler:
         prompt_base = string.Template(
             textwrap.dedent(
                 """\
-            You're a professional summary writer. Read the abstract of delimited by triple backquotes and summarize it, \
+            You're a professional summary writer. Read the abstract delimited by triple backquotes and summarize it, \
             then write exactly 3 key points in the output section indicated with [OUTPUT]
 
             ```${abstract}```
