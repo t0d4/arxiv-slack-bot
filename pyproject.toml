@@ -6,22 +6,23 @@ authors = ["t0d4 <todatakaaki@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.8.1"
 arxiv = "^1.4.7"
-transformers = "^4.29.1"
+transformers = "^4.29.2"
 slack-bolt = "^1.18.0"
 deepl = "^1.14.0"
 python-dotenv = "^1.0.0"
-aiohttp = "^3.8.4"
 sympy = "^1.12"
 torch = "^2.0.1"
-langchain = "^0.0.176"
+langchain = "^0.0.180"
 pypdf = "^3.9.0"
 sentence-transformers = "^2.2.2"
+faiss-cpu = "^1.7.4"
+
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.3.0"
-ruff = "^0.0.267"
+ruff = "^0.0.270"
 isort = "^5.12.0"
 
 [build-system]
