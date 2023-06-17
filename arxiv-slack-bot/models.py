@@ -221,7 +221,7 @@ class DocumentHandler:
         prompt_base = string.Template(
             textwrap.dedent(
                 """\
-            You're a professional summary writer. Read the abstract of delimited by triple backquotes and summarize it, \
+            You're a professional summary writer. Read the abstract delimited by triple backquotes and summarize it, \
             then write exactly 3 key points in the output section indicated with [OUTPUT]
 
             ```${abstract}```
@@ -276,7 +276,7 @@ class DocumentHandler:
         # split it into chunks
         pdf_pages = loader.load()
         # prepare text splitter TODO: optimize the parameters
-        splitter = RecursiveCharacterTextSplitter(chunk_size=256, chunk_overlap=16)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=32)
         # split pdf pages into smaller chunks
         docs = splitter.split_documents(documents=pdf_pages)
         # vectorize the document using FAISS
@@ -340,8 +340,9 @@ class DocumentHandler:
             retriever=db.as_retriever(
                 k=2
             ),  # retrieve 2 most related parts from the document
-            chain_type="map_reduce",
+            chain_type="refine",
             return_source_documents=True,
+            max_tokens_limit=1024,  # max tokens limit of Vicuna-7B
         )
 
         # translate question into English before passing it to LLM
